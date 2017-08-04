@@ -16,124 +16,136 @@
 % 	3. Kernel Canonical Discriminant Analysis (can have DR or no DR) uses mediods
 %% Load data
 dir = 'D:\Classification-Products\1 - Spectral Library\Combined Single Date\';
-name_140416 = '140416_spectral_library';
+dir_out = 'D:\Classification-Products\4 - LDA Classification\Combined Single Date\';
+name = {'140829'};%'130411', '130606', '131125','140416', '140606', '140829','Spring', 'Summer', 'Fall'
+iterations = 20;
 
-speclib_140416 = readtable(strcat(dir, name_140416,'_spectra.csv'),'ReadVariableNames',1);
-metalib_140416 = readtable(strcat(dir, name_140416,'_metadata.csv'),'ReadVariableNames',1);
-
-%% Splitting into Training/Validation
-metalib_all = table2cell(metalib_140416);
-name_train_polys = [];
-dominantList = unique(metalib_all(:,14));
-
-% Pull out which polygons are used for training
-for d = 1:size(dominantList,1)
-    pix_in_poly = metalib_all(strmatch(dominantList(d), metalib_all(:,14)),:); % Get all pixels that belong to this dominant species
-    name_of_poly = unique(pix_in_poly(:,3));  % Get the number of polygons for dominant species
-    num_train_poly = round(0.2 * size(name_of_poly, 1));  % Determine how many polygons are going to be set aside for training
-    name_train_poly = cell(10, num_train_poly);  % Array to hold index of trained polygons 
-    for t = 1:10
-        name_train_poly(t,:) = datasample(name_of_poly, num_train_poly);
+for k = 1: size(name,2)
+    %Reset Variables
+    speclib = [];
+    metalib = [];
+    metalib_all = [];
+    name_train = [];
+    speclib_all = [];
+    
+    %Read in Data
+    speclib = readtable(strcat(dir, cell2mat(name(k)),'_spectral_library_spectra.csv'),'ReadVariableNames',1,'Delimiter',',');
+    metalib = readtable(strcat(dir, cell2mat(name(k)),'_spectral_library_metadata.csv'),'ReadVariableNames',1,'Delimiter',',');
+    
+    % Splitting into Training/Validation
+    metalib_all = table2cell(metalib);
+    speclib_all = cell2mat(table2cell(speclib(:,6:229)));
+    remove_species = {'AGRES','ARGL','BAPI','BRNI','CECU','PISA','PLRA','POFR','PSMA','ROCK','SOIL','UMCA','URBAN'};
+    for j = 1:size(remove_species,2)
+        remove_index = find(strcmp(remove_species(j), metalib_all(:,15))==1);
+        metalib_all(remove_index,:) = [];
+        speclib_all(remove_index,:) = [];
     end
-    name_train_polys = [name_train_polys name_train_poly];    
-end
 
-%% Dimensionality Reduction
-% Currently CDA
-
-speclib_all = cell2mat(table2cell(speclib_140416(:,6:229)));
-speclib_train = [];
-metalib_train =[];
-speclib_valid = [];
-metalib_valid = [];
-
-% Pulling out spectra that are included in training polygons
-for i = 1: size(name_train_polys,2)
-    index_train = find(strcmp(name_train_polys(1,i), metalib_all(:,3)) == 1);
-    index_valid = find(strcmp(name_train_polys(1,i), metalib_all(:,3)) == 0);
-    speclib_train = vertcat(speclib_train, speclib_all(index_train,:));
-    metalib_train = vertcat(metalib_train, metalib_all(index_train,:));
-    speclib_valid = vertcat(speclib_valid, speclib_all(index_valid,:));
-    metalib_valid = vertcat(metalib_valid, metalib_all(index_valid,:));
-end
-
-speclib_train( :, ~any(speclib_train,1) ) = []; % Removing band bands
-speclib_valid( :, ~any(speclib_valid,1) ) = []; % Removing band bands
-
-% Run manova for training library   
-[d, p, cdastats] = manova1(speclib_train, metalib_train(:,14));
-n_groups = size(unique(metalib_train(:,14)), 1);
-
-% Calculate canonical variables for training and validation libraries
-% n=nspec, m=nbands, p=ngroups-1
-canon_vars_Train = speclib_train * cdastats.eigenvec(:, 1:n_groups-1);  %(n x m) * (m x p) = (n x p)
-canon_vars_Valid = speclib_valid * cdastats.eigenvec(:, 1:n_groups-1);  %(n x m) * (m x p) = (n x p)
-
-%% Classification
-% Currently using LDA
-
-valid_class = classify(canon_vars_Valid, canon_vars_Train, metalib_train(:,14));
-
-%% Classification Accuracy
-%Overall Accuracy
-num_valid = length(metalib_valid(:,14));
-correct = strcmp(valid_class, metalib_valid(:,14));
-overall_acc = 100*(1 - (num_valid - sum(correct)) / num_valid);
-
-%Error Matrix
-%in error matrix, rows (j) are classified class and cols (i) are true class
-errmat = zeros(n_groups+1, n_groups+1);
-groupIDs = unique(metalib_valid(:,14));
-unmod_value = 9999;
-groupIDs_wunmod = vertcat(groupIDs, unmod_value);
-for j = 1:n_groups+1
-    for i = 1:n_groups+1
-        temp1 = find(strcmp(valid_class, groupIDs_wunmod(j)));
-        temp2 = find(strcmp(metalib_valid(:,14), groupIDs_wunmod(i)));
-        temp = intersect(temp1,temp2);
-        count = length(temp);
-        errmat(j,i)=count;
+    % Remove some bad bands
+    speclib_all(:,61:63) = 0;
+    speclib_all(:,80:85) = 0;
+    speclib_all(:,117:121) = 0;
+    speclib_all(:,151:153) = 0;
+    speclib_all(:,172:180) = 0;
+    speclib_all(:,208:221) = 0;
+    
+    % Split into training and validation
+    n_groups = size(unique(metalib_all(:,15)), 1);
+    [name_train, name_valid] = train_val_separation(metalib_all, iterations);
+    
+    overall = zeros(iterations, 1);
+    kappa = zeros(iterations, 2);
+    produseracc = zeros(n_groups, 2, iterations);
+    errmat = zeros(n_groups+1, n_groups+1, iterations);
+    cda = zeros(141, n_groups-1, iterations);
+    
+    for n = 1: iterations
+        index_train = [];
+        index_valid = [];
+        
+        % Pulling out spectra that are included in training polygons
+        for i = 1: size(name_train,2)
+            index_train_temp = find(strcmp(name_train(n,i), metalib_all(:,3)) == 1);
+            index_train = vertcat(index_train, index_train_temp);
+        end
+        for i = 1: size(name_valid,2)
+            index_valid_temp = find(strcmp(name_valid(n,i), metalib_all(:,3)) == 1);
+            index_valid = vertcat(index_valid, index_valid_temp);
+        end
+        
+        % Pulling out spectra that are included in training polygons
+        speclib_train = speclib_all(index_train,:);
+        metalib_train = cell2mat(metalib_all(index_train,16));
+        metalib_train_poly = metalib_all(index_train,3);
+        speclib_valid = speclib_all(index_valid,:);
+        metalib_valid = cell2mat(metalib_all(index_valid,16));
+        metalib_valid_poly = metalib_all(index_valid,3);
+        
+        speclib_train( :, ~any(speclib_train, 1) ) = []; % Removing band bands
+        speclib_valid( :, ~any(speclib_valid, 1) ) = []; % Removing band bands
+        
+        % OUTPUTS:
+        % accstats: accuracy stats (overall, cappa, error matrix, producers/users, valid class(what it was classified as), valid group (truth))
+        % cdastats: comes out of manova1 function, eigenvectors, eigen values, all cda outputs
+        
+        % FUNCTION:
+        [overall(n), kappa(n, :), produseracc(:, :, n), errmat(:,:,n), cda(:,:,n)] = CDA_manova(speclib_train,metalib_train,metalib_train_poly,speclib_valid,metalib_valid,metalib_valid_poly);
+        
     end
-end
-
-%Kappa
-theta1=zeros(n_groups,1);
-theta2=zeros(n_groups,1);
-theta3=zeros(n_groups,1);
-theta4=zeros(n_groups,n_groups);
-matrix_sumA=sum(errmat);
-matrix_sum=sum(matrix_sumA);
-for i=1:n_groups
-    theta1(i)=errmat(i,i)/matrix_sum;
-    theta2(i)=sum(errmat(:,i))*sum(errmat(i,:))/(matrix_sum^2);
-    theta3(i)=errmat(i,i)*(sum(errmat(:,i))+sum(errmat(i,:)))/(matrix_sum^2);
-    for j=1:n_groups
-        theta4(j,i)=errmat(j,i)*((sum(errmat(:,i))+sum(errmat(j,:)))^2)/(matrix_sum^3);
+    % Results
+    
+    mean_overall = mean(overall);
+    mean_kappa = mean(kappa,1);
+    mean_produser = mean(produseracc,3);
+    mean_errmat = sum(errmat,3);
+    mean_cda = mean(cda,3);
+    group_name = unique(metalib_all(:,15));
+    
+    % Output CDA Results
+    fileID = fopen(strcat(dir_out,cell2mat(name(k)),'_cda.csv'),'w');
+    for r = 1:size(mean_cda,1)
+        fprintf(fileID,'%f,',mean_cda(r,:));
+        fprintf(fileID,'\n');
     end
+    fclose(fileID);
+    
+    % Output the Classification results
+    fileID = fopen(strcat(dir_out,cell2mat(name(k)),'_results.csv'),'w');
+    fprintf(fileID,'%s\n', 'Overall Accuracy for all Iterations');
+    fprintf(fileID,'%2.2f,', overall);
+    fprintf(fileID,'\n');
+    fprintf(fileID,'%s\n','Mean Overall Accuracy');
+    fprintf(fileID,'%2.2f', mean_overall);
+    fprintf(fileID,'\n');
+    fprintf(fileID,'%s\n','Kappa for all Iterations');
+    fprintf(fileID,'%.4f,',kappa(:,1));
+    fprintf(fileID,'\n');
+    fprintf(fileID,'%s\n',' Mean Kappa');
+    fprintf(fileID,'%.4f',mean_kappa(:,1));
+    fprintf(fileID,'\n');
+    fprintf(fileID,'%s\n','Species, Producer Accuracy, User Accuracy');
+    for r = 1:size(mean_produser,1)
+        fprintf(fileID, '%s,', cell2mat(group_name(r)));
+        fprintf(fileID, '%2.2f,', mean_produser(r,:));
+        fprintf(fileID,'\n');
+    end
+    fprintf(fileID,'%s\n','Error Matrix');
+    fprintf(fileID,'\n');
+    for c = 1:size(group_name,1)+1
+        if c == 1
+            fprintf(fileID, '%s,', ' ');
+        elseif c == size(group_name,1)+1
+            fprintf(fileID, '%s\n', cell2mat(group_name(c-1)));
+        else
+            fprintf(fileID, '%s,',cell2mat(group_name(c-1)));
+        end      
+    end
+    for r = 1:size(mean_errmat,1)-1
+        fprintf(fileID,'%s,',cell2mat(group_name(r,:)));
+        fprintf(fileID,'%.2f,',mean_errmat(r,:));
+        fprintf(fileID,'\n');
+    end
+    fclose(fileID);
+
 end
-theta1_sum=sum(theta1);
-theta2_sum=sum(theta2);
-theta3_sum=sum(theta3);
-theta4_sumA=sum(theta4);
-theta4_sum=sum(theta4_sumA);
-kappa=(theta1_sum-theta2_sum)/(1-theta2_sum);
-
-%Kappa Variance
-var1=(1/matrix_sum);
-var2=((theta1_sum*(1-theta1_sum))/((1-theta2_sum)^2));
-var3=((2*(1-theta1_sum)*(2*theta1_sum*theta2_sum-theta3_sum))/((1-theta2_sum)^3));
-var4=((((1-theta1_sum)^3)*(theta4_sum-4*(theta2_sum^2)))/((1-theta2_sum)^4));
-kappa_var=var1*(var2+var3+var4);
-
-%Producer's & User's Accuracies
-for i=1:n_groups
-    prod_acc(i)=errmat(i,i)/sum(errmat(:,i))*100; %sum by col
-    user_acc(i)=errmat(i,i)/sum(errmat(i,:))*100; %sum by row
-end
-
-% Output Accuracy Stats
-accstats.overall=overall_acc;
-accstats.kappa = [kappa;kappa_var];
-accstats.prodacc = prod_acc(:);
-accstats.useracc = user_acc(:);
-accstats.errmat=errmat;
